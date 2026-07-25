@@ -10,12 +10,12 @@ PURPOSE:      AI 產生程式碼 / 文件清洗工具。
               - 支援檔案 / 剪貼簿 / CLI 操作
               - 結構化 CleaningReport 狀態回報
 EXPORTS:      clean_file, sanitize_clipboard, sanitize_python, sanitize_text,
-              diff_two_files
+              ask_file_path
 IMPORTS:      argparse, dataclasses, hashlib, pathlib, typing, tkinter(optional)
 FORBIDDEN:    禁止直接覆寫使用者原始檔案；清理結果一律另存新檔，原檔保持不動
 DEPENDENCIES: 剪貼簿功能（MODE 4）依賴系統已安裝 Tkinter，未安裝時該功能停用
               但檔案模式（MODE 1-3）不受影響
-VERSION:      1.0.0 [Stability: Experimental]
+VERSION:      1.0.1 [Stability: Experimental]
 ==========================================================
 """
 
@@ -32,15 +32,16 @@ from typing import Final
 # 全檔案唯一版本號來源，禁止在其他任何地方重複手動輸入字面值
 # ==========================================================
 __MODULE_NAME__: Final[str] = "Script_AICodeSanitizer"
-__VERSION__: Final[str] = "1.0.0"
+__VERSION__: Final[str] = "1.0.1"
 
 
-# Tkinter 剪貼簿支援檢測
+# Tkinter 支援檢測（剪貼簿操作 + 檔案選取視窗皆依賴此模組）
 # 注意：Final 變數僅宣告一次，兩個分支各自賦值，避免 mypy 對同一 Final
 # 變數在不同分支重複型別宣告產生警告
 HAS_TK: Final[bool]
 try:
     import tkinter as tk
+    from tkinter import filedialog
     HAS_TK = True
 except ImportError:
     HAS_TK = False
@@ -304,7 +305,19 @@ def get_clipboard_text() -> str:
 
 
 def set_clipboard_text(text: str) -> None:
-    """安全將文字寫回剪貼簿（含 Windows 異步防護）。"""
+    """
+    安全將文字寫回剪貼簿。
+
+    【v1.0.1 Bug Fix 說明】
+    舊版用 root.update_idletasks() + root.after(100) 試圖延遲銷毀視窗，
+    但 after() 只是「排程」一個回呼，沒有 mainloop() 在跑，那個回呼永遠
+    不會真正被執行——等於沒延遲。緊接著 finally 就呼叫 root.destroy()，
+    Tk 視窗在剪貼簿內容真正交接給作業系統之前就被銷毀，剪貼簿擁有權跟著
+    釋放，內容因此直接消失（使用者回報「MODE4 會把剪貼簿清空」的根因）。
+
+    修正做法：改用 root.update()（非 update_idletasks），這會真正處理
+    事件佇列、完成剪貼簿的交接程序，確認內容已落地後才安全銷毀視窗。
+    """
     if not HAS_TK:
         raise RuntimeError("目前的環境未安裝 Tkinter，無法存取剪貼簿。")
 
@@ -313,12 +326,38 @@ def set_clipboard_text(text: str) -> None:
     try:
         root.clipboard_clear()
         root.clipboard_append(text)
-        root.update_idletasks()
-        root.after(100)
+        root.update()  # 關鍵修正：真正處理事件佇列，完成剪貼簿交接
     except tk.TclError as err:
         raise RuntimeError(f"寫入剪貼簿時發生 Tkinter 錯誤: {err}")
     finally:
         root.destroy()
+
+
+def ask_file_path(title: str = "請選擇要清理的檔案") -> str:
+    """
+    跳出系統原生檔案選取視窗，回傳使用者選擇的檔案路徑字串。
+    使用者取消選擇時回傳空字串，呼叫端須自行檢查。
+    僅在 HAS_TK 為 True 時可用；環境無 Tkinter 時由呼叫端降級為手動輸入路徑。
+    """
+    if not HAS_TK:
+        raise RuntimeError("目前的環境未安裝 Tkinter，無法開啟檔案選取視窗。")
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        path = filedialog.askopenfilename(
+            title=title,
+            filetypes=[
+                ("所有支援的檔案", "*.py *.pyw *.txt"),
+                ("Python 檔案", "*.py *.pyw"),
+                ("文字檔案", "*.txt"),
+                ("所有檔案", "*.*"),
+            ],
+        )
+    finally:
+        root.destroy()
+
+    return path
 
 
 def clean_file(
@@ -421,6 +460,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("file", type=str, nargs="?", help="輸入檔案路徑")
     parser.add_argument("--pure-tab", action="store_true", help="Python 模式強制純 TAB 縮排")
     parser.add_argument("--dry-run", action="store_true", help="測試執行，不實際寫入檔案")
+    parser.add_argument(
+        "--no-pause", action="store_true",
+        help="結束後不停在終端機等待按鍵（供自動化腳本呼叫使用，一般手動執行不需加此參數）"
+    )
     return parser
 
 
@@ -479,9 +522,14 @@ def interactive_mode() -> None:
 
         # 1-3: 檔案模式
         if mode in (1, 2, 3):
-            file_input = input("請輸入檔案路徑: ").strip().strip('"').strip("'")
+            if HAS_TK:
+                file_input = ask_file_path()
+            else:
+                # 降級處理：環境沒有 Tkinter 時才退回手動輸入路徑
+                file_input = input("請輸入檔案路徑: ").strip().strip('"').strip("'")
+
             if not file_input:
-                print("[取消] 未輸入任何檔案路徑")
+                print("[取消] 未選擇任何檔案")
                 return
 
             pure = False
@@ -519,6 +567,11 @@ def main() -> None:
         cli_mode(args.mode, args.file, args.pure_tab, args.dry_run)
     else:
         interactive_mode()
+
+    # 結束後停在終端機，避免雙擊執行時視窗一閃而逝、來不及檢核結果
+    # --no-pause 保留給自動化腳本呼叫時使用，一般手動執行不需要加此參數
+    if not args.no_pause:
+        input("\n按 Enter 鍵結束程式...")
 
 
 if __name__ == "__main__":
