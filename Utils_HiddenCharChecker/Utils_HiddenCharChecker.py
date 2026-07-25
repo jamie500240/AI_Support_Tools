@@ -1,141 +1,524 @@
-# ==========================================================
-# MODULE:      Utils_HiddenCharChecker (完全沒有經過任何調教，直接從 Claude 手上拿到的版本)
-# PURPOSE:     貼上程式碼／文字前的隱形字元檢查工具。專門抓出網頁複製時
-#              常見、肉眼看不出來但會讓 Python 直譯器報錯的特殊空白字元
-#              （不斷行空格、全形空格、零寬字元、UTF-8 BOM）。
-# EXPORTS:     scan_file, clean_and_save
-# IMPORTS:     tkinter, pathlib, unicodedata
-# FORBIDDEN:   禁止直接覆寫原檔；清理後一律另存新檔，原檔保持不動
-# VERSION:     0.0.0 [Stability: Experimental]
-# ==========================================================
-#
-# 【給新手的說明】
-# 為什麼需要這個工具？
-# 從網頁、Word、某些筆記軟體複製文字貼到程式碼編輯器時，常常會夾帶一種
-# 叫做「不斷行空格」(U+00A0) 的特殊字元。它在螢幕上長得跟一般空格一模
-# 一樣，肉眼完全分辨不出來，但 Python 直譯器不認得它，貼上去執行時就
-# 會直接報 SyntaxError，讓人摸不著頭緒——這支工具就是用來抓出這種問題。
-#
-# 怎麼用？
-# 直接執行這支程式，跳出視窗選擇你要檢查的檔案（通常是 .py，但任何純
-# 文字檔都可以檢查），它會告訴你有沒有問題，有問題的話會問你要不要
-# 自動清理並另存一份乾淨的版本（不會動到你的原始檔案）。
+"""
+==========================================================
+MODULE:       Script_AICodeSanitizer
+PURPOSE:      AI 產生程式碼 / 文件清洗工具。
 
-import tkinter as tk
-import unicodedata
+              功能：
+              - 清除 AI 複製造成的隱形字元與 BOM
+              - 精準白名單移除 Markdown Code Fence
+              - Python 縮排與空白標準化
+              - 支援檔案 / 剪貼簿 / CLI 操作
+              - 結構化 CleaningReport 狀態回報
+EXPORTS:      clean_file, sanitize_clipboard, sanitize_python, sanitize_text,
+              diff_two_files
+IMPORTS:      argparse, dataclasses, hashlib, pathlib, typing, tkinter(optional)
+FORBIDDEN:    禁止直接覆寫使用者原始檔案；清理結果一律另存新檔，原檔保持不動
+DEPENDENCIES: 剪貼簿功能（MODE 4）依賴系統已安裝 Tkinter，未安裝時該功能停用
+              但檔案模式（MODE 1-3）不受影響
+VERSION:      1.0.0 [Stability: Experimental]
+==========================================================
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from typing import Final
 
-# ==========================================
-# 1. CONFIG - 這裡列出所有要抓的可疑字元
-# ==========================================
-# 每一項是 (字元, 替換成什麼, 給人看的說明)
-# 替換成 None 代表「直接刪除」，替換成字串代表「替換成這個字元」
-SUSPICIOUS_CHARS = [
-    ("\ufeff", None, "UTF-8 BOM（檔案開頭的隱形記號，常見於 Windows 記事本另存的檔案）"),
-    ("\u00a0", " ", "不斷行空格 U+00A0（網頁複製最常見的兇手，長得跟空格一樣）"),
-    ("\u3000", " ", "全形空格 U+3000（中文網頁排版常見）"),
-    ("\u200b", None, "零寬空格 U+200B（完全看不見，常見於某些網頁編輯器）"),
-    ("\u200c", None, "零寬非連字 U+200C"),
-    ("\u200d", None, "零寬連字 U+200D"),
-    ("\u202f", " ", "窄不斷行空格 U+202F"),
-]
+# ==========================================================
+# 模組識別資訊單一化（ACDS v2.3 第七章 / ADR-004）
+# 全檔案唯一版本號來源，禁止在其他任何地方重複手動輸入字面值
+# ==========================================================
+__MODULE_NAME__: Final[str] = "Script_AICodeSanitizer"
+__VERSION__: Final[str] = "1.0.0"
 
 
-def scan_file(file_path: Path) -> list:
-    """
-    掃描檔案，回傳所有發現的可疑字元清單。
-    每筆紀錄包含：行號、字元的 Unicode 編碼、字元名稱。
-    """
-    raw = file_path.read_bytes()
-    has_bom = raw.startswith(b"\xef\xbb\xbf")
-    text = raw.decode("utf-8")
-
-    findings = []
-    if has_bom:
-        findings.append((0, "U+FEFF", "檔案開頭 UTF-8 BOM"))
-
-    for i, ch in enumerate(text):
-        for target_char, _, description in SUSPICIOUS_CHARS:
-            if ch == target_char and target_char != "\ufeff":  # BOM 已經另外處理過
-                line_no = text[:i].count("\n") + 1
-                code_point = f"U+{ord(ch):04X}"
-                findings.append((line_no, code_point, description))
-
-    return findings
+# Tkinter 剪貼簿支援檢測
+# 注意：Final 變數僅宣告一次，兩個分支各自賦值，避免 mypy 對同一 Final
+# 變數在不同分支重複型別宣告產生警告
+HAS_TK: Final[bool]
+try:
+    import tkinter as tk
+    HAS_TK = True
+except ImportError:
+    HAS_TK = False
 
 
-def clean_text(text: str) -> str:
-    """依照 SUSPICIOUS_CHARS 表格，把所有可疑字元替換或刪除，回傳乾淨的文字"""
-    for target_char, replacement, _ in SUSPICIOUS_CHARS:
+# ==========================================================
+# CONFIG & SETTING & MAPPING (純設定與對照)
+# ==========================================================
+
+# 注意：此數值為本工具的「換算策略預設值」，非 Python Lexer 的物理 Tab Stop 規則
+TAB_WIDTH_ASSUMPTION: Final[int] = 4
+
+# AI 常見複製污染字元與對應替換字元 (SSOT)
+INVISIBLE_CHARS: Final[dict[str, str | None]] = {
+    "\ufeff": None,      # UTF-8 BOM
+    "\u200b": None,      # Zero Width Space
+    "\u200c": None,      # Zero Width Non Joiner
+    "\u200d": None,      # Zero Width Joiner
+    "\u00a0": " ",       # Non Breaking Space
+    "\u202f": " ",       # Narrow NBSP
+    "\u2000": " ",       # En Quad
+    "\u2001": " ",       # Em Quad
+    "\u2002": " ",       # En Space
+    "\u2003": " ",       # Em Space
+    "\u2004": " ",       # Three-per-em Space
+    "\u2005": " ",       # Four-per-em Space
+    "\u2006": " ",       # Six-per-em Space
+    "\u2007": " ",       # Figure Space
+    "\u2008": " ",       # Punctuation Space
+    "\u2009": " ",       # Thin Space
+    "\u200a": " ",       # Hair Space
+}
+
+# 允許移除的 Markdown Code Fence 開頭白名單 (SSOT 自動修飾為小寫)
+CODE_FENCE_MARKERS: Final[set[str]] = {
+    marker.lower()
+    for marker in {
+        "```",
+        "```python",
+        "```py",
+        "```text",
+        "```bash",
+        "```json",
+    }
+}
+
+# 模式與副檔名對照表
+PYTHON_EXTENSIONS: Final[set[str]] = {".py", ".pyw"}
+
+
+# ==========================================================
+# REPORTING MODEL (結構化報告)
+# ==========================================================
+
+@dataclass
+class CleaningReport:
+    """處理結果與統計報表數據結構。"""
+    mode_name: str
+    original_size: int
+    cleaned_size: int
+    warnings: list[str] = field(default_factory=list)
+    output_path: Path | None = None
+    is_dry_run: bool = False
+
+    @property
+    def changed(self) -> bool:
+        return self.original_size != self.cleaned_size
+
+    def print_summary(self) -> None:
+        """格式化輸出摘要報表。"""
+        status_title = "DRY-RUN REPORT" if self.is_dry_run else "CLEANING REPORT"
+        print(f"\n======== {status_title} ========")
+        print(f"Mode         : {self.mode_name}")
+        print(f"Original Size: {self.original_size} chars")
+        print(f"Cleaned Size : {self.cleaned_size} chars")
+        print(f"Difference   : {self.cleaned_size - self.original_size} chars")
+        print(f"Content Changed: {'Yes' if self.changed else 'No'}")
+
+        if self.output_path:
+            print(f"Output File  : {self.output_path.name}")
+        elif self.is_dry_run:
+            print("Output File  : (None - Dry Run)")
+
+        if self.warnings:
+            print("\nWarnings / Notices:")
+            for w in self.warnings:
+                print(f"  - {w}")
+        print("=================================\n")
+
+
+# ==========================================================
+# TOOLS: CLEANING CORE ENGINE (純演算工具)
+# ==========================================================
+
+def normalize_newline(text: str) -> str:
+    """統一換行格式為 LF (\n)。"""
+    if not isinstance(text, str):
+        raise TypeError("輸入必須為字串")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def remove_invisible_chars(text: str) -> str:
+    """清除或替換 AI 複製常見隱形字元。"""
+    if not isinstance(text, str):
+        raise TypeError("輸入必須為字串")
+    for char, replacement in INVISIBLE_CHARS.items():
         if replacement is None:
-            text = text.replace(target_char, "")
+            text = text.replace(char, "")
         else:
-            text = text.replace(target_char, replacement)
+            text = text.replace(char, replacement)
     return text
 
 
-def clean_and_save(file_path: Path) -> Path:
+def remove_trailing_spaces(text: str) -> str:
+    """清除每行右側空白，保留左側排版。"""
+    lines = text.split("\n")
+    cleaned = [line.rstrip(" \t\u3000") for line in lines]
+    return "\n".join(cleaned)
+
+
+def clean_common(text: str) -> str:
+    """共用清理 Pipeline (所有模式皆須經過)。"""
+    text = normalize_newline(text)
+    text = remove_invisible_chars(text)
+    return text
+
+
+def remove_code_fence(text: str) -> str:
+    """以白名單機制保守移除 Markdown Code Fence。"""
+    lines = text.split("\n")
+
+    # 精準匹配小寫白名單標記
+    if lines and lines[0].strip().lower() in CODE_FENCE_MARKERS:
+        lines.pop(0)
+
+    # 移除最後一行結尾的 ```
+    if lines and lines[-1].strip() == "```":
+        lines.pop()
+
+    return "\n".join(lines)
+
+
+def clean_python_indent_line(line: str, warnings: list[str], force_pure_tab: bool = False) -> str:
+    """修復單行 Python 縮排，支援餘數空格處理與 Warning 收集。"""
+    line = line.rstrip(" \t\u3000")
+    if not line:
+        return ""
+
+    width = 0
+    index = 0
+
+    while index < len(line):
+        char = line[index]
+        if char == " ":
+            width += 1
+        elif char == "\u3000":
+            width += 2
+        elif char == "\t":
+            width += TAB_WIDTH_ASSUMPTION
+        else:
+            break
+        index += 1
+
+    tab_count = width // TAB_WIDTH_ASSUMPTION
+    remainder = width % TAB_WIDTH_ASSUMPTION
+
+    if remainder != 0:
+        msg = f"偵測到非標準縮排（無法被 {TAB_WIDTH_ASSUMPTION} 整除）: {width} spaces"
+        if msg not in warnings:
+            warnings.append(msg)
+
+    if force_pure_tab:
+        indent = "\t" * tab_count
+    else:
+        indent = ("\t" * tab_count) + (" " * remainder)
+
+    return indent + line[index:]
+
+
+def sanitize_python(text: str, warnings: list[str], force_pure_tab: bool = False) -> str:
+    """Python 完整清理管道。"""
+    text = clean_common(text)
+    text = remove_code_fence(text)
+
+    lines = text.split("\n")
+    cleaned_lines = [clean_python_indent_line(line, warnings, force_pure_tab) for line in lines]
+
+    text = "\n".join(cleaned_lines)
+    text = remove_trailing_spaces(text)
+    return text.rstrip() + "\n"
+
+
+def sanitize_text(text: str) -> str:
+    """TXT 保守清理管道 (不動左側排版)。"""
+    text = clean_common(text)
+    text = remove_trailing_spaces(text)
+    return text.rstrip() + "\n"
+
+
+def detect_mode(file_path: Path) -> int:
+    """根據副檔名自動判斷清洗模式。"""
+    if file_path.suffix.lower() in PYTHON_EXTENSIONS:
+        return 2
+    return 3
+
+
+# ==========================================================
+# TOOLS: OUTPUT SAFETY (輸出覆寫防護 — ACDS 第三章 P0 第 3、4 條)
+# ==========================================================
+
+def _content_hash(text: str) -> str:
+    """計算文字內容的 SHA-256 雜湊值，用於判斷覆寫是否安全。"""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def resolve_output_path(file_path: Path, cleaned_text: str) -> Path:
     """
-    讀取原始檔案、清除所有可疑字元、另存成新檔案（不覆蓋原檔）。
-    回傳新檔案的路徑。
+    決定輸出檔案路徑，內建覆寫防護：
+    - 目標檔案不存在 → 直接使用預設檔名
+    - 目標檔案存在且內容雜湊相同 → 視為同一結果，安全覆寫（不留垃圾檔案）
+    - 目標檔案存在但內容雜湊不同 → 撞名衝突，禁止靜默覆寫，改用時間戳記區分
     """
-    raw = file_path.read_bytes()
-    # 先去除 BOM（如果有的話），再解碼
-    if raw.startswith(b"\xef\xbb\xbf"):
-        raw = raw[3:]
-    text = raw.decode("utf-8")
+    default_path = file_path.with_name(f"{file_path.stem}_已清理{file_path.suffix}")
 
-    cleaned = clean_text(text)
-
-    new_path = file_path.with_name(f"{file_path.stem}_已清理{file_path.suffix}")
-    new_path.write_text(cleaned, encoding="utf-8")
-    return new_path
-
-
-def main():
-    root = tk.Tk()
-    root.withdraw()
-
-    print("========================================")
-    print("   隱形字元檢查器 v0.0.0")
-    print("========================================")
-    print("請選擇要檢查的檔案（例如貼上去、準備存檔的 .py 或 .json）")
-
-    file_path_str = filedialog.askopenfilename(
-        title="選擇要檢查的檔案",
-        filetypes=[("所有檔案", "*.*"), ("Python 檔案", "*.py"), ("JSON 檔案", "*.json")],
-    )
-    root.destroy()
-
-    if not file_path_str:
-        print("[資訊] 未選擇檔案，程式結束。")
-        return
-
-    file_path = Path(file_path_str)
+    if not default_path.exists():
+        return default_path
 
     try:
-        findings = scan_file(file_path)
-    except UnicodeDecodeError as e:
-        print(f"[錯誤] 檔案編碼異常，無法以 UTF-8 讀取：{e}")
-        return
+        existing_text = default_path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        # 既有檔案無法安全讀取比對，保守處理為撞名衝突
+        existing_text = None
 
-    if not findings:
-        print(f"\n✅ 檢查完成：{file_path.name} 乾淨，未發現任何隱形字元問題。")
-        return
+    if existing_text is not None and _content_hash(existing_text) == _content_hash(cleaned_text):
+        return default_path
 
-    print(f"\n⚠️ 發現 {len(findings)} 個可疑字元：")
-    for line_no, code_point, description in findings:
-        location = f"檔案開頭" if line_no == 0 else f"第 {line_no} 行"
-        print(f"  {location}｜{code_point}｜{description}")
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return file_path.with_name(f"{file_path.stem}_已清理_{timestamp}{file_path.suffix}")
 
-    choice = input("\n是否要自動清理並另存一份乾淨的版本？(Y/N): ").strip().upper()
-    if choice == "Y":
-        new_path = clean_and_save(file_path)
-        print(f"\n✅ 已清理完成，新檔案已儲存為：{new_path.name}")
-        print(f"📄 原始檔案未被更動，你可以比對兩份檔案確認差異後再決定是否取代。")
+
+# ==========================================================
+# TOOLS: IO & CLIPBOARD (檔案與剪貼簿操作)
+# ==========================================================
+
+def get_clipboard_text() -> str:
+    """安全讀取剪貼簿文字內容。"""
+    if not HAS_TK:
+        raise RuntimeError("目前的環境未安裝 Tkinter，無法存取剪貼簿。")
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        text = root.clipboard_get()
+    except tk.TclError:
+        raise ValueError("剪貼簿內沒有可讀取的文字內容。")
     else:
-        print("\n[終止] 未進行清理，原始檔案保持不變。")
+        return text
+    finally:
+        root.destroy()
+
+
+def set_clipboard_text(text: str) -> None:
+    """安全將文字寫回剪貼簿（含 Windows 異步防護）。"""
+    if not HAS_TK:
+        raise RuntimeError("目前的環境未安裝 Tkinter，無法存取剪貼簿。")
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update_idletasks()
+        root.after(100)
+    except tk.TclError as err:
+        raise RuntimeError(f"寫入剪貼簿時發生 Tkinter 錯誤: {err}")
+    finally:
+        root.destroy()
+
+
+def clean_file(
+    file_path: Path,
+    mode: int,
+    force_pure_tab: bool = False,
+    dry_run: bool = False
+) -> CleaningReport:
+    """
+    讀取檔案並執行清洗，回報結構化 CleaningReport。
+    """
+    if not file_path.exists():
+        raise FileNotFoundError(f"找不到指定檔案: {file_path}")
+
+    warnings: list[str] = []
+
+    # 安全讀檔 (含明確編碼警告標示)
+    try:
+        text = file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        warnings.append("檔案非標準 UTF-8 編碼，將使用 errors='replace'，部分字元可能被替換為 ")
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+
+    # 模式判斷
+    selected_mode = detect_mode(file_path) if mode == 1 else mode
+    mode_map = {2: "Python", 3: "TXT"}
+    mode_name = mode_map.get(selected_mode, "Unknown")
+
+    if selected_mode == 2:
+        cleaned = sanitize_python(text, warnings, force_pure_tab)
+    elif selected_mode == 3:
+        cleaned = sanitize_text(text)
+    else:
+        raise ValueError(f"不合法的清理模式 MODE: {mode}")
+
+    output_path = resolve_output_path(file_path, cleaned) if not dry_run else None
+
+    report = CleaningReport(
+        mode_name=mode_name,
+        original_size=len(text),
+        cleaned_size=len(cleaned),
+        warnings=warnings,
+        output_path=output_path,
+        is_dry_run=dry_run
+    )
+
+    # 僅在非 Dry-Run 情況下實際寫檔
+    if not dry_run:
+        try:
+            output_path.write_text(cleaned, encoding="utf-8")
+        except OSError as err:
+            raise IOError(f"寫入檔案失敗: {err}")
+
+    return report
+
+
+def sanitize_clipboard(mode: int, force_pure_tab: bool = False) -> CleaningReport:
+    """清理剪貼簿流程，回傳報告。"""
+    print("\n[Clipboard] 讀取剪貼簿中...")
+    warnings: list[str] = []
+
+    text = get_clipboard_text()
+    mode_name = "Python (Clipboard)" if mode == 2 else "TXT (Clipboard)"
+
+    if mode == 2:
+        cleaned = sanitize_python(text, warnings, force_pure_tab)
+    elif mode == 3:
+        cleaned = sanitize_text(text)
+    else:
+        raise ValueError("剪貼簿模式只能指定 MODE 2 (Python) 或 3 (TXT)")
+
+    set_clipboard_text(cleaned)
+
+    return CleaningReport(
+        mode_name=mode_name,
+        original_size=len(text),
+        cleaned_size=len(cleaned),
+        warnings=warnings,
+        output_path=None,
+        is_dry_run=False
+    )
+
+
+# ==========================================================
+# CLI & INTERACTIVE HANDLERS
+# ==========================================================
+
+def build_parser() -> argparse.ArgumentParser:
+    """建立命令列參數解析器。"""
+    parser = argparse.ArgumentParser(
+        description=f"{__MODULE_NAME__} - 清理 AI 產生的程式碼與隱形字元"
+    )
+    parser.add_argument(
+        "mode",
+        type=int,
+        nargs="?",
+        choices=[1, 2, 3],
+        help="1 = Auto Detect, 2 = Python, 3 = TXT"
+    )
+    parser.add_argument("file", type=str, nargs="?", help="輸入檔案路徑")
+    parser.add_argument("--pure-tab", action="store_true", help="Python 模式強制純 TAB 縮排")
+    parser.add_argument("--dry-run", action="store_true", help="測試執行，不實際寫入檔案")
+    return parser
+
+
+def _print_error(prefix: str, err: Exception) -> None:
+    """統一錯誤輸出格式，附上例外類型方便事後判讀。"""
+    print(f"[錯誤:{type(err).__name__}] {prefix}: {err}")
+
+
+def cli_mode(mode: int, filename: str, force_pure_tab: bool = False, dry_run: bool = False) -> None:
+    """CLI 入口。"""
+    path = Path(filename)
+    try:
+        report = clean_file(path, mode, force_pure_tab, dry_run)
+        report.print_summary()
+    except FileNotFoundError as err:
+        _print_error("找不到檔案", err)
+    except (UnicodeDecodeError, ValueError, TypeError) as err:
+        _print_error("內容或參數錯誤", err)
+    except (IOError, OSError) as err:
+        _print_error("檔案讀寫失敗", err)
+    except Exception as err:  # 保底：任何未預期的例外仍須攔截，不得讓程式直接崩潰
+        _print_error("未預期的錯誤", err)
+
+
+def interactive_mode() -> None:
+    """互動選單模式。"""
+    print(f"""
+======================================
+       {__MODULE_NAME__} v{__VERSION__}
+======================================
+1 = File Auto Detect
+2 = Python Sanitizer
+3 = TXT Sanitizer
+4 = Clipboard Sanitizer
+======================================
+""")
+    try:
+        mode_input = input("請選擇 MODE (1-4): ").strip()
+        if not mode_input.isdigit():
+            print("[錯誤] 請輸入有效數字 (1-4)")
+            return
+
+        mode = int(mode_input)
+
+        # 4: 剪貼簿模式
+        if mode == 4:
+            clip_mode = input("\nClipboard 類型 (2=Python, 3=TXT): ").strip()
+            if clip_mode not in ("2", "3"):
+                print("[錯誤] 剪貼簿模式只能選擇 2 或 3")
+                return
+            pure = input("是否強制純 TAB？(y/N): ").strip().lower() == "y"
+            report = sanitize_clipboard(int(clip_mode), pure)
+            report.print_summary()
+            print("[完成] 剪貼簿清理完成！可以直接按下 Ctrl + V 貼上。")
+            return
+
+        # 1-3: 檔案模式
+        if mode in (1, 2, 3):
+            file_input = input("請輸入檔案路徑: ").strip().strip('"').strip("'")
+            if not file_input:
+                print("[取消] 未輸入任何檔案路徑")
+                return
+
+            pure = False
+            if mode == 2:
+                pure = input("Python 是否強制純 TAB？(y/N): ").strip().lower() == "y"
+
+            dry_run_choice = input("是否進行 Dry-Run 測試 (不實際寫入)？(y/N): ").strip().lower() == "y"
+
+            report = clean_file(Path(file_input), mode, pure, dry_run=dry_run_choice)
+            report.print_summary()
+            return
+
+        print("[錯誤] 無效的 MODE 選擇")
+
+    except FileNotFoundError as err:
+        _print_error("找不到檔案", err)
+    except (UnicodeDecodeError, ValueError, TypeError) as err:
+        _print_error("內容或參數錯誤", err)
+    except (IOError, OSError, RuntimeError) as err:
+        _print_error("執行環境錯誤", err)
+    except Exception as err:  # 保底：互動模式禁止讓未預期例外直接中斷程式
+        _print_error("未預期的錯誤", err)
+
+
+# ==========================================================
+# MAIN / SINGLE ENTRY POINT COORDINATOR (單一入口)
+# ==========================================================
+
+def main() -> None:
+    """單一入口協調器。"""
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if args.mode is not None and args.file is not None:
+        cli_mode(args.mode, args.file, args.pure_tab, args.dry_run)
+    else:
+        interactive_mode()
 
 
 if __name__ == "__main__":
