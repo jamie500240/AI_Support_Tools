@@ -7,15 +7,24 @@ PURPOSE:      AI 產生程式碼 / 文件清洗工具。
               - 清除 AI 複製造成的隱形字元與 BOM
               - 精準白名單移除 Markdown Code Fence
               - Python 縮排與空白標準化
-              - 支援檔案 / 剪貼簿 / CLI 操作
+              - 支援檔案模式（CLI 參數或跳出系統選取視窗）
               - 結構化 CleaningReport 狀態回報
-EXPORTS:      clean_file, sanitize_clipboard, sanitize_python, sanitize_text,
-              ask_file_path
+EXPORTS:      clean_file, sanitize_python, sanitize_text, ask_file_path,
+              resolve_output_path
 IMPORTS:      argparse, dataclasses, hashlib, pathlib, typing, tkinter(optional)
-FORBIDDEN:    禁止直接覆寫使用者原始檔案；清理結果一律另存新檔，原檔保持不動
-DEPENDENCIES: 剪貼簿功能（MODE 4）依賴系統已安裝 Tkinter，未安裝時該功能停用
-              但檔案模式（MODE 1-3）不受影響
-VERSION:      1.0.1 [Stability: Experimental]
+FORBIDDEN:    禁止直接覆寫使用者原始檔案；禁止覆寫既有的「已清理」輸出檔案，
+              一律另存新檔
+DEPENDENCIES: 檔案選取視窗依賴系統已安裝 Tkinter，未安裝時自動降級為手動輸入路徑
+VERSION:      1.1.0 [Stability: Experimental]
+
+【v1.1.0 變更摘要】
+- 移除剪貼簿模式（原 MODE 4）。實測顯示 Tkinter 剪貼簿交接時機在部分環境下
+  仍不穩定，功能泛用性也低，經使用者確認後直接移除，不再嘗試修補。若日後
+  需要剪貼簿功能，建議改用獨立的第三方套件（如 pyperclip），不與本工具的
+  核心清理邏輯耦合。
+- 強化 resolve_output_path 防撞規則：只要預設輸出檔名已存在，一律不覆寫，
+  固定另存新檔（時間戳記區分）。舊版曾在雜湊相同時安全覆寫視為去重，但實測
+  發現這會讓使用者誤以為對照組的處理成果被取代，因此改採更保守的策略。
 ==========================================================
 """
 
@@ -32,10 +41,10 @@ from typing import Final
 # 全檔案唯一版本號來源，禁止在其他任何地方重複手動輸入字面值
 # ==========================================================
 __MODULE_NAME__: Final[str] = "Script_AICodeSanitizer"
-__VERSION__: Final[str] = "1.0.1"
+__VERSION__: Final[str] = "1.1.0"
 
 
-# Tkinter 支援檢測（剪貼簿操作 + 檔案選取視窗皆依賴此模組）
+# Tkinter 支援檢測（僅供檔案選取視窗 ask_file_path 使用）
 # 注意：Final 變數僅宣告一次，兩個分支各自賦值，避免 mypy 對同一 Final
 # 變數在不同分支重複型別宣告產生警告
 HAS_TK: Final[bool]
@@ -257,12 +266,20 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def resolve_output_path(file_path: Path, cleaned_text: str) -> Path:
+def resolve_output_path(file_path: Path, cleaned_text: str, warnings: list[str]) -> Path:
     """
-    決定輸出檔案路徑，內建覆寫防護：
+    決定輸出檔案路徑，落實嚴格防撞保護：
     - 目標檔案不存在 → 直接使用預設檔名
-    - 目標檔案存在且內容雜湊相同 → 視為同一結果，安全覆寫（不留垃圾檔案）
-    - 目標檔案存在但內容雜湊不同 → 撞名衝突，禁止靜默覆寫，改用時間戳記區分
+    - 目標檔案已存在 → 一律視為「這裡已經有處理過的成果」，不覆寫，
+      改用時間戳記另存新檔（極端情況下時間戳記也撞名，改用流水號）
+
+    【設計取捨說明】
+    舊版曾在雜湊相同時允許安全覆寫（視為去重、不留垃圾檔案）。但實測發現：
+    使用者若對同一份原始檔案跑過不同模式做對照測試，兩次結果偶然雜湊相同時，
+    會被覆寫成同一個檔案，使用者誤以為自己保留的處理成果被取代掉。因此改採
+    更保守的策略：只要撞到既有檔名，一律另存新檔，不做覆寫判斷。雜湊仍會計算，
+    但只用來在報告中提醒使用者「這次結果與既有檔案內容相同」，內容是否要手動
+    清掉重複檔案交由使用者自行決定，不由程式代為判斷。
     """
     default_path = file_path.with_name(f"{file_path.stem}_已清理{file_path.suffix}")
 
@@ -271,67 +288,30 @@ def resolve_output_path(file_path: Path, cleaned_text: str) -> Path:
 
     try:
         existing_text = default_path.read_text(encoding="utf-8")
+        if _content_hash(existing_text) == _content_hash(cleaned_text):
+            warnings.append(
+                f"提醒：這次清理結果與既有檔案「{default_path.name}」內容完全相同，"
+                "基於防撞規則仍另存為新檔、未覆寫原檔，如不需要可自行刪除重複檔案。"
+            )
     except (UnicodeDecodeError, OSError):
-        # 既有檔案無法安全讀取比對，保守處理為撞名衝突
-        existing_text = None
-
-    if existing_text is not None and _content_hash(existing_text) == _content_hash(cleaned_text):
-        return default_path
+        pass  # 既有檔案無法讀取比對，不影響防撞邏輯，直接進入另存流程
 
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return file_path.with_name(f"{file_path.stem}_已清理_{timestamp}{file_path.suffix}")
+    candidate = file_path.with_name(f"{file_path.stem}_已清理_{timestamp}{file_path.suffix}")
+
+    # 極端情況：同一秒內重複執行導致時間戳記也撞名時，改用流水號區分
+    counter = 1
+    while candidate.exists():
+        candidate = file_path.with_name(f"{file_path.stem}_已清理_{timestamp}_{counter}{file_path.suffix}")
+        counter += 1
+
+    return candidate
 
 
 # ==========================================================
-# TOOLS: IO & CLIPBOARD (檔案與剪貼簿操作)
+# TOOLS: IO & FILE DIALOG (檔案 I/O 與選取視窗)
 # ==========================================================
-
-def get_clipboard_text() -> str:
-    """安全讀取剪貼簿文字內容。"""
-    if not HAS_TK:
-        raise RuntimeError("目前的環境未安裝 Tkinter，無法存取剪貼簿。")
-
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        text = root.clipboard_get()
-    except tk.TclError:
-        raise ValueError("剪貼簿內沒有可讀取的文字內容。")
-    else:
-        return text
-    finally:
-        root.destroy()
-
-
-def set_clipboard_text(text: str) -> None:
-    """
-    安全將文字寫回剪貼簿。
-
-    【v1.0.1 Bug Fix 說明】
-    舊版用 root.update_idletasks() + root.after(100) 試圖延遲銷毀視窗，
-    但 after() 只是「排程」一個回呼，沒有 mainloop() 在跑，那個回呼永遠
-    不會真正被執行——等於沒延遲。緊接著 finally 就呼叫 root.destroy()，
-    Tk 視窗在剪貼簿內容真正交接給作業系統之前就被銷毀，剪貼簿擁有權跟著
-    釋放，內容因此直接消失（使用者回報「MODE4 會把剪貼簿清空」的根因）。
-
-    修正做法：改用 root.update()（非 update_idletasks），這會真正處理
-    事件佇列、完成剪貼簿的交接程序，確認內容已落地後才安全銷毀視窗。
-    """
-    if not HAS_TK:
-        raise RuntimeError("目前的環境未安裝 Tkinter，無法存取剪貼簿。")
-
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        root.clipboard_clear()
-        root.clipboard_append(text)
-        root.update()  # 關鍵修正：真正處理事件佇列，完成剪貼簿交接
-    except tk.TclError as err:
-        raise RuntimeError(f"寫入剪貼簿時發生 Tkinter 錯誤: {err}")
-    finally:
-        root.destroy()
-
 
 def ask_file_path(title: str = "請選擇要清理的檔案") -> str:
     """
@@ -393,7 +373,7 @@ def clean_file(
     else:
         raise ValueError(f"不合法的清理模式 MODE: {mode}")
 
-    output_path = resolve_output_path(file_path, cleaned) if not dry_run else None
+    output_path = resolve_output_path(file_path, cleaned, warnings) if not dry_run else None
 
     report = CleaningReport(
         mode_name=mode_name,
@@ -412,33 +392,6 @@ def clean_file(
             raise IOError(f"寫入檔案失敗: {err}")
 
     return report
-
-
-def sanitize_clipboard(mode: int, force_pure_tab: bool = False) -> CleaningReport:
-    """清理剪貼簿流程，回傳報告。"""
-    print("\n[Clipboard] 讀取剪貼簿中...")
-    warnings: list[str] = []
-
-    text = get_clipboard_text()
-    mode_name = "Python (Clipboard)" if mode == 2 else "TXT (Clipboard)"
-
-    if mode == 2:
-        cleaned = sanitize_python(text, warnings, force_pure_tab)
-    elif mode == 3:
-        cleaned = sanitize_text(text)
-    else:
-        raise ValueError("剪貼簿模式只能指定 MODE 2 (Python) 或 3 (TXT)")
-
-    set_clipboard_text(cleaned)
-
-    return CleaningReport(
-        mode_name=mode_name,
-        original_size=len(text),
-        cleaned_size=len(cleaned),
-        warnings=warnings,
-        output_path=None,
-        is_dry_run=False
-    )
 
 
 # ==========================================================
@@ -497,28 +450,15 @@ def interactive_mode() -> None:
 1 = File Auto Detect
 2 = Python Sanitizer
 3 = TXT Sanitizer
-4 = Clipboard Sanitizer
 ======================================
 """)
     try:
-        mode_input = input("請選擇 MODE (1-4): ").strip()
+        mode_input = input("請選擇 MODE (1-3): ").strip()
         if not mode_input.isdigit():
-            print("[錯誤] 請輸入有效數字 (1-4)")
+            print("[錯誤] 請輸入有效數字 (1-3)")
             return
 
         mode = int(mode_input)
-
-        # 4: 剪貼簿模式
-        if mode == 4:
-            clip_mode = input("\nClipboard 類型 (2=Python, 3=TXT): ").strip()
-            if clip_mode not in ("2", "3"):
-                print("[錯誤] 剪貼簿模式只能選擇 2 或 3")
-                return
-            pure = input("是否強制純 TAB？(y/N): ").strip().lower() == "y"
-            report = sanitize_clipboard(int(clip_mode), pure)
-            report.print_summary()
-            print("[完成] 剪貼簿清理完成！可以直接按下 Ctrl + V 貼上。")
-            return
 
         # 1-3: 檔案模式
         if mode in (1, 2, 3):
