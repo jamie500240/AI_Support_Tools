@@ -3,7 +3,7 @@ javascript:(function(){
   let existing = document.getElementById('gemini-minimap');
   if(existing) existing.remove();
 
-  /* 2. 100% 使用你原本成功的選擇器 */
+  /* 2. 獲取所有可能的區塊 */
   let selectors = [
     'message-content', 
     'user-query', 
@@ -13,14 +13,19 @@ javascript:(function(){
     'div[class*="chat-message"]'
   ].join(', ');
 
-  let blocks = document.querySelectorAll(selectors); 
+  let rawBlocks = Array.from(document.querySelectorAll(selectors));
   
+  /* 修正 1：過濾掉重複的子元素。如果該區塊被包含在另一個符合條件的外層區塊內，就排除它 */
+  let blocks = rawBlocks.filter(block => {
+    return !rawBlocks.some(parent => parent !== block && parent.contains(block));
+  });
+
   if(blocks.length === 0) {
     alert('找不到對話區塊！');
     return;
   }
 
-  /* 3. 建立右側容器，設定固定寬度讓靠左右能發揮作用 */
+  /* 3. 建立右側容器 */
   let container = document.createElement('div');
   container.id = 'gemini-minimap';
   Object.assign(container.style, {
@@ -33,7 +38,7 @@ javascript:(function(){
   blocks.forEach(function(block) {
     let line = document.createElement('div');
     
-    /* 安全判斷：是你還是AI (避免程式報錯) */
+    /* 判斷是使用者還是 AI */
     let isUser = false;
     let tag = block.tagName ? block.tagName.toLowerCase() : '';
     let author = block.getAttribute('data-message-author') || '';
@@ -47,7 +52,7 @@ javascript:(function(){
         isUser = true;
     }
 
-    /* 設定樣式：藍色靠右(你)，灰色靠左(AI) */
+    /* 設定樣式 */
     let bgColor = isUser ? '#1a73e8' : '#5f6368';
     Object.assign(line.style, {
       width: isUser ? '20px' : '28px', 
@@ -64,10 +69,10 @@ javascript:(function(){
     text = text.replace(/\s+/g, ' ').trim();
     line.title = (isUser ? '你: ' : 'AI: ') + (text.length > 30 ? text.substring(0, 30) + '...' : (text || '圖片或無文字內容'));
 
-    /* 安全的點擊跳轉 (加上微微的高亮提示) */
+    /* 修正 2：將跳轉行為從 'center' 改為 'start'，並加入一點緩衝間距 */
     line.onclick = function(e) {
       try {
-        block.scrollIntoView({behavior: 'smooth', block: 'center'});
+        block.scrollIntoView({behavior: 'smooth', block: 'start'});
         let oldBg = block.style.backgroundColor;
         block.style.backgroundColor = 'rgba(255, 235, 59, 0.2)';
         setTimeout(function() { block.style.backgroundColor = oldBg; }, 800);
