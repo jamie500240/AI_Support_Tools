@@ -1,0 +1,247 @@
+javascript:(async function(){
+  try {
+    let existingToast = document.getElementById('ai-exporter-toast');
+    if(existingToast) existingToast.remove();
+
+    let host = location.hostname;
+    let platform = 'AI_Chat';
+    let getTurns = null;
+
+    /* 角色隔離去重 */
+    function dedupeSameRole(els) {
+      let filtered = els.filter(b => {
+        let rect = b.getBoundingClientRect();
+        let isNav = b.closest('nav') || b.closest('aside');
+        let hasText = (b.innerText || b.textContent || '').trim().length > 0;
+        return rect.height > 0 && !isNav && hasText;
+      });
+      return filtered.filter(b => !filtered.some(p => p !== b && p.contains(b)));
+    }
+
+    function combineAndSort(userEls, aiEls) {
+      let items = [];
+      userEls.forEach(el => items.push({ el, isUser: true, y: el.getBoundingClientRect().top + window.scrollY }));
+      aiEls.forEach(el => items.push({ el, isUser: false, y: el.getBoundingClientRect().top + window.scrollY }));
+      items.sort((a, b) => a.y - b.y);
+      return items;
+    }
+
+    /* =========================================================
+       1. 獨立平台分流選擇器 (Handlers)
+       ========================================================= */
+    if (host.includes('openai') || host.includes('chatgpt')) {
+      platform = 'ChatGPT';
+      getTurns = () => {
+        let user = Array.from(document.querySelectorAll('[data-message-author-role="user"], [data-testid*="user-message"], [data-testid*="user"]'));
+        if (user.length === 0) {
+          user = Array.from(document.querySelectorAll('.whitespace-pre-wrap')).filter(el => {
+            return !el.closest('[data-message-author-role="assistant"]') && !el.closest('.markdown');
+          });
+        }
+        let ai = Array.from(document.querySelectorAll('[data-message-author-role="assistant"], [data-testid*="assistant-message"], .markdown'));
+        return combineAndSort(dedupeSameRole(user), dedupeSameRole(ai));
+      };
+    } else if (host.includes('grok') || host.includes('x.ai') || host.includes('x.com')) {
+      platform = 'Grok';
+      getTurns = () => {
+        let user = Array.from(document.querySelectorAll('[data-testid*="user"], [class*="user-message"], [class*="userMessage"]'));
+        let ai = Array.from(document.querySelectorAll('[data-testid*="assistant"], [data-testid*="grok"], div[class*="response-container"], .prose'));
+        return combineAndSort(dedupeSameRole(user), dedupeSameRole(ai));
+      };
+    } else if (host.includes('perplexity')) {
+      platform = 'Perplexity';
+      getTurns = () => {
+        let userSel = 'h1, [data-testid="user-query"], [data-testid*="user-query"], .font-display, .whitespace-pre-line';
+        let userRaw = Array.from(document.querySelectorAll(userSel)).filter(el => {
+          let isInsideAI = el.closest('.prose') || el.closest('[class*="prose"]') || el.closest('[class*="answer"]');
+          return !isInsideAI;
+        });
+        let aiRaw = Array.from(document.querySelectorAll('.prose, [class*="prose"], [class*="answer"]'));
+        return combineAndSort(dedupeSameRole(userRaw), dedupeSameRole(aiRaw));
+      };
+    } else if (host.includes('claude')) {
+      platform = 'Claude';
+      getTurns = () => {
+        let user = Array.from(document.querySelectorAll('[data-testid="user-message"], [data-testid*="user-message"], .font-user-message, [class*="font-user"]'));
+        let ai = Array.from(document.querySelectorAll('[data-testid="assistant-message"], [data-testid*="assistant-message"], .font-claude-response, [class*="font-claude"]'));
+        return combineAndSort(dedupeSameRole(user), dedupeSameRole(ai));
+      };
+    } else if (host.includes('gemini') || host.includes('google')) {
+      platform = 'Gemini';
+      getTurns = () => {
+        let user = Array.from(document.querySelectorAll('user-query, [data-message-author="user"]'));
+        let ai = Array.from(document.querySelectorAll('model-response, message-content, [data-message-author="model"]'));
+        return combineAndSort(dedupeSameRole(user), dedupeSameRole(ai));
+      };
+    } else if (host.includes('copilot') || host.includes('bing')) {
+      platform = 'Copilot';
+      getTurns = () => {
+        let user = Array.from(document.querySelectorAll('[data-content="user-message"], [class*="user-message"], [class*="userMessage"], cib-message-group[source="user"]'));
+        let ai = Array.from(document.querySelectorAll('[data-content="ai-message"], [class*="ai-message"], .markdown-body, cib-message-group[source="bot"]'));
+        return combineAndSort(dedupeSameRole(user), dedupeSameRole(ai));
+      };
+    } else {
+      platform = 'AI_Chat';
+      getTurns = () => {
+        let user = Array.from(document.querySelectorAll('[data-testid*="user"], .user-message'));
+        let ai = Array.from(document.querySelectorAll('[data-testid*="assistant"], .markdown, .prose'));
+        return combineAndSort(dedupeSameRole(user), dedupeSameRole(ai));
+      };
+    }
+
+    let items = getTurns();
+
+    if (!items || items.length === 0) {
+      alert(`找不到 ${platform} 的對話內容！`);
+      return;
+    }
+
+    let toast = document.createElement('div');
+    toast.id = 'ai-exporter-toast';
+    toast.innerText = `正在為您匯出 ${platform} 對話與圖文...`;
+    toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#1f2937;color:#fff;padding:12px 24px;border-radius:8px;z-index:9999999;box-shadow:0 4px 12px rgba(0,0,0,0.3);font-family:sans-serif;font-size:14px;';
+    document.body.appendChild(toast);
+
+    let md = `# ${platform} 對話備份 (${new Date().toLocaleDateString()})\n\n---\n\n`;
+
+    /* =========================================================
+       2. 高階轉換引擎 (佔位符 Code 保護 + Grok 長空行修復)
+       ========================================================= */
+    for (let i = 0; i < items.length; i++) {
+      let item = items[i];
+      let b = item.el;
+      let speaker = item.isUser ? '👤 你 (User)' : `🤖 ${platform}`;
+
+      let clone = b.cloneNode(true);
+
+      /* 防嵌套淨化 */
+      if (!item.isUser) {
+        let subUsers = clone.querySelectorAll('[data-message-author-role="user"], [data-testid*="user"], user-query, [data-testid="user-query"]');
+        subUsers.forEach(su => su.remove());
+      }
+
+      /* 移除干擾元素 (腳本、樣式、按鈕、圖示) */
+      clone.querySelectorAll('script, style, svg, button, nav, audio, [aria-hidden="true"], .hidden, .copy-button, [aria-label*="Copy"]').forEach(el => el.remove());
+
+      /* 【步驟 A】提取 Code 區塊並轉為「佔位符」 */
+      let codeBlocks = [];
+      clone.querySelectorAll('pre').forEach((pre, idx) => {
+        let codeNode = pre.querySelector('code') || pre;
+        let cls = (codeNode.className || '') + ' ' + (pre.className || '');
+        let match = cls.match(/(?:language|lang)-(\w+)/);
+        let lang = match ? match[1] : '';
+        let codeText = (codeNode.textContent || '').trim();
+
+        let placeholder = `___CODE_BLOCK_PH_${idx}_${Date.now()}___`;
+        codeBlocks.push({ placeholder, lang, codeText });
+
+        let phNode = document.createElement('p');
+        phNode.textContent = placeholder;
+        pre.replaceWith(phNode);
+      });
+
+      /* 處理單行 Code */
+      clone.querySelectorAll('code').forEach(c => {
+        let text = c.textContent || '';
+        let span = document.createElement('span');
+        span.textContent = ' `' + text.trim() + '` ';
+        c.replaceWith(span);
+      });
+
+      /* 【步驟 B】脫離 DOM 提取文字 */
+      clone.style.cssText = 'position:absolute;left:-9999px;top:-9999px;white-space:pre-wrap;';
+      document.body.appendChild(clone);
+      let rawText = clone.innerText ? clone.innerText : clone.textContent;
+      document.body.removeChild(clone);
+
+      /* 【步驟 C】徹底消除 Grok 與 Next.js 產生的連續長空行 */
+      let cleanText = (rawText || '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')  /* 核心：將 3 個以上的連續換行縮減為標準的雙換行 */
+        .trim();
+
+      /* 【步驟 D】還原格式完美的 Code 區塊 */
+      codeBlocks.forEach(cb => {
+        let formattedCode = `\n\n\`\`\`${cb.lang}\n${cb.codeText}\n\`\`\`\n\n`;
+        cleanText = cleanText.replace(cb.placeholder, formattedCode);
+      });
+
+      /* 再次微調 Markdown 標題後的空行 */
+      cleanText = cleanText.replace(/(#+\s+[^\n]+)\n{3,}/g, '$1\n\n');
+
+      /* 【步驟 E】萬能圖片抓取機制 */
+      let imgs = Array.from(b.querySelectorAll('img')).filter(img => {
+        let src = img.currentSrc || img.src || img.getAttribute('srcset') || '';
+        let isAvatar = src.includes('avatar') || src.includes('profile') || src.includes('user');
+        let isTooSmall = (img.width > 0 && img.width <= 25) || (img.height > 0 && img.height <= 25);
+        return !isAvatar && !isTooSmall && src.length > 0;
+      });
+
+      if (!cleanText && imgs.length === 0) continue;
+
+      md += `### ${speaker}\n\n`;
+      if (cleanText) md += cleanText + '\n\n';
+
+      /* 圖片 Base64 轉換 + URL 備用策略 */
+      for (let j = 0; j < imgs.length; j++) {
+        let imgEl = imgs[j];
+        let src = imgEl.currentSrc || imgEl.src;
+        if (!src) continue;
+        let b64 = null;
+
+        if (src.startsWith('data:')) {
+          b64 = src;
+        } else {
+          try {
+            let res = await fetch(src);
+            let blob = await res.blob();
+            b64 = await new Promise(r => {
+              let f = new FileReader();
+              f.onloadend = () => r(f.result);
+              f.readAsDataURL(blob);
+            });
+          } catch(e1) {
+            try {
+              b64 = await new Promise((resolve, reject) => {
+                let tempImg = new Image();
+                tempImg.crossOrigin = 'Anonymous';
+                tempImg.onload = () => {
+                  let canvas = document.createElement('canvas');
+                  canvas.width = tempImg.naturalWidth || tempImg.width || 300;
+                  canvas.height = tempImg.naturalHeight || tempImg.height || 150;
+                  canvas.getContext('2d').drawImage(tempImg, 0, 0);
+                  resolve(canvas.toDataURL('image/png'));
+                };
+                tempImg.onerror = reject;
+                tempImg.src = src;
+              });
+            } catch(e2) {
+              b64 = null;
+            }
+          }
+        }
+
+        let finalImgSrc = b64 ? b64 : src;
+        md += `<img src="${finalImgSrc}" alt="圖片" style="max-width:100%; border-radius:8px;" />\n\n`;
+      }
+
+      md += '---\n\n';
+    }
+
+    /* =========================================================
+       3. 觸發 Markdown 下載
+       ========================================================= */
+    let finalBlob = new Blob([md], {type:'text/markdown;charset=utf-8;'});
+    let a = document.createElement('a');
+    a.href = URL.createObjectURL(finalBlob);
+    a.download = `${platform}_Backup_${Date.now()}.md`;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast.remove();
+
+  } catch(err) {
+    alert('發生錯誤: ' + err.message);
+  }
+})();
