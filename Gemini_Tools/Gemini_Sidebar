@@ -1,0 +1,40 @@
+javascript:(function(){
+  /* 移除已經存在的導航列避免重複點擊產生多個 */
+  let existing = document.getElementById('gemini-minimap');
+  if(existing) existing.remove();
+
+  /* 建立右側容器 */
+  let container = document.createElement('div');
+  container.id = 'gemini-minimap';
+  Object.assign(container.style, {
+    position: 'fixed', right: '20px', top: '50%', transform: 'translateY(-50%)',
+    display: 'flex', flexDirection: 'column', gap: '8px', zIndex: '9999'
+  });
+
+  /* 抓取 Gemini 的對話區塊 (這裡使用涵蓋大部分對話標籤的選擇器) */
+  let blocks = document.querySelectorAll('message-content, div[data-message-author]'); 
+  if(blocks.length === 0) {
+    alert('找不到對話區塊，可能是網頁結構有更新。');
+    return;
+  }
+
+  /* 根據對話數量生成橫線 */
+  blocks.forEach((block) => {
+    let line = document.createElement('div');
+    Object.assign(line.style, {
+      width: '24px', height: '4px', backgroundColor: '#d3d3d3',
+      borderRadius: '2px', cursor: 'pointer', transition: 'background-color 0.3s'
+    });
+    
+    /* 點擊跳轉功能 */
+    line.onclick = () => block.scrollIntoView({behavior: 'smooth', block: 'center'});
+    
+    /* 簡單的滾動變色邏輯 (滑鼠移入變黑，移出變灰，作為簡易互動) */
+    line.onmouseover = () => line.style.backgroundColor = '#000000';
+    line.onmouseout = () => line.style.backgroundColor = '#d3d3d3';
+    
+    container.appendChild(line);
+  });
+
+  document.body.appendChild(container);
+})();
