@@ -1,0 +1,78 @@
+javascript:(function(){
+  /* 1. 清除舊的導航列 */
+  let existing = document.getElementById('robust-minimap');
+  if(existing) existing.remove();
+
+  /* 2. 鎖定使用者的發言特徵 (將 *= 改為精確匹配或鎖定核心 class，減少誤判) */
+  let selectors = [
+    '[data-testid="user-message"]',
+    '.font-user-message',
+    'user-query',
+    '[data-message-author="user"]'
+  ].join(', ');
+
+  let rawBlocks = Array.from(document.querySelectorAll(selectors));
+
+  /* 3. 核心修正：剔除「幽靈區塊」與「空區塊」 */
+  rawBlocks = rawBlocks.filter(block => {
+    let rect = block.getBoundingClientRect();
+    let text = block.innerText || '';
+    /* 必須在畫面上有高度，且文字內容去空白後不為空 */
+    return rect.height > 0 && text.trim().length > 0;
+  });
+
+  /* 4. 剔除被包在內層的重複子元素 */
+  let blocks = rawBlocks.filter(block => {
+    return !rawBlocks.some(parent => parent !== block && parent.contains(block));
+  });
+
+  if(blocks.length === 0) {
+    alert('找不到使用者的對話區塊！');
+    return;
+  }
+
+  /* 5. 建立右側容器 */
+  let container = document.createElement('div');
+  container.id = 'robust-minimap';
+  Object.assign(container.style, {
+    position: 'fixed', right: '20px', top: '50%', transform: 'translateY(-50%)',
+    display: 'flex', flexDirection: 'column', gap: '8px', zIndex: '999999',
+    width: '32px'
+  });
+
+  /* 6. 生成導航線 */
+  blocks.forEach(function(block) {
+    let line = document.createElement('div');
+    
+    Object.assign(line.style, {
+      width: '20px', height: '4px', backgroundColor: '#1a73e8',
+      borderRadius: '2px', cursor: 'pointer', transition: 'all 0.3s',
+      alignSelf: 'flex-end'
+    });
+    
+    let text = block.innerText || '';
+    text = text.replace(/\s+/g, ' ').trim();
+    line.title = '你: ' + (text.length > 30 ? text.substring(0, 30) + '...' : text);
+
+    /* 加入 100px 頂部安全間距，避開導覽列 */
+    line.onclick = function(e) {
+      try {
+        block.style.scrollMarginTop = '100px';
+        block.scrollIntoView({behavior: 'smooth', block: 'start'});
+        
+        let oldBg = block.style.backgroundColor;
+        block.style.backgroundColor = 'rgba(255, 235, 59, 0.2)';
+        setTimeout(function() { block.style.backgroundColor = oldBg; }, 800);
+      } catch(err) {
+        console.log('跳轉失敗', err);
+      }
+    };
+
+    line.onmouseover = function() { line.style.backgroundColor = '#0d47a1'; };
+    line.onmouseout = function() { line.style.backgroundColor = '#1a73e8'; };
+    
+    container.appendChild(line);
+  });
+
+  document.body.appendChild(container);
+})();
