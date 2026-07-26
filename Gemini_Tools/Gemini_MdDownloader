@@ -4,7 +4,7 @@ javascript:(async function(){
     if(blocks.length === 0) { alert('找不到對話內容！'); return; }
     
     var toast = document.createElement('div');
-    toast.innerText = '正在擷取圖文並轉檔（如果圖片很多需要幾秒鐘），請稍候...';
+    toast.innerText = '正在擷取圖文與程式碼排版，請稍候...';
     toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:12px 24px;border-radius:8px;z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.3);';
     document.body.appendChild(toast);
     
@@ -12,16 +12,50 @@ javascript:(async function(){
     
     for(var i=0; i<blocks.length; i++) {
       var b = blocks[i];
+      
+      /* 1. 抓取圖片 */
       var imgs = Array.from(b.querySelectorAll('img')).filter(function(img){ 
         return !img.src.includes('avatar') && img.width > 20; 
       });
-      var text = b.innerText ? b.innerText.trim() : '';
       
-      if(!text && imgs.length === 0) continue;
+      /* 2. 複製對話區塊，準備進行程式碼排版處理 */
+      var clone = b.cloneNode(true);
       
+      /* 移除複製按鈕等雜訊文字 */
+      var btns = clone.querySelectorAll('button');
+      btns.forEach(function(btn){ btn.remove(); });
+      
+      /* 將多行程式碼 <pre> 轉換為 Markdown 的 ``` 區塊 */
+      var pres = clone.querySelectorAll('pre');
+      pres.forEach(function(pre) {
+        var codeNode = pre.querySelector('code');
+        var codeText = (codeNode ? codeNode.innerText || codeNode.textContent : pre.innerText || pre.textContent) || '';
+        var mdCode = '\n```\n' + codeText.trim() + '\n```\n';
+        pre.replaceWith(document.createTextNode(mdCode));
+      });
+      
+      /* 將單行程式碼 <code> 轉換為 Markdown 的 ` 區塊 */
+      var codes = clone.querySelectorAll('code');
+      codes.forEach(function(c) {
+        var text = c.innerText || c.textContent;
+        c.replaceWith(document.createTextNode(' `' + text.trim() + '` '));
+      });
+
+      /* 為了讓 innerText 正常抓取換行，需要短暫將 clone 放入網頁中再取出 */
+      clone.style.display = 'block';
+      clone.style.position = 'absolute';
+      clone.style.left = '-9999px';
+      document.body.appendChild(clone);
+      var textContent = clone.innerText ? clone.innerText.trim() : '';
+      document.body.removeChild(clone);
+      
+      if(!textContent && imgs.length === 0) continue;
+      
+      /* 組合內容 */
       md += '### 💬 對話區塊 ' + (i+1) + '\n\n';
-      if(text) md += text + '\n\n';
+      if(textContent) md += textContent + '\n\n';
       
+      /* 3. 將圖片轉為 Base64 防破圖 */
       for(var j=0; j<imgs.length; j++) {
         var imgSrc = imgs[j].src;
         try {
@@ -40,6 +74,7 @@ javascript:(async function(){
       md += '---\n\n';
     }
     
+    /* 下載檔案 */
     var finalBlob = new Blob([md], {type:'text/markdown;charset=utf-8;'});
     var a = document.createElement('a');
     a.href = URL.createObjectURL(finalBlob);
