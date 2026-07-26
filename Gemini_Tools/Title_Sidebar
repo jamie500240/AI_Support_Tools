@@ -3,79 +3,86 @@ javascript:(function(){
   let existing = document.getElementById('heading-minimap');
   if(existing) existing.remove();
 
-  /* 2. 抓取 H1 ~ H4 標題 */
-  let rawBlocks = Array.from(document.querySelectorAll('h1, h2, h3, h4'));
+  /* 2. 優先鎖定 AI 回答區塊 (涵蓋 ChatGPT, Claude, Gemini, Perplexity) */
+  let aiContainers = document.querySelectorAll('[data-message-author-role="assistant"], .markdown, .prose, article');
+  let rawBlocks = [];
+
+  if (aiContainers.length > 0) {
+    aiContainers.forEach(container => {
+      let headings = Array.from(container.querySelectorAll('h1, h2, h3, h4'));
+      rawBlocks.push(...headings);
+
+      /* 解決 GPT 痛點：若該則回答沒有 Markdown 標題，自動抓取開頭粗體字當備用標題 */
+      if (headings.length === 0) {
+        let bolds = Array.from(container.querySelectorAll('p > strong:first-child, p > b:first-child'));
+        bolds.forEach(b => {
+          if ((b.innerText || '').trim().length > 2) {
+            b.isFallbackBold = true;
+            rawBlocks.push(b);
+          }
+        });
+      }
+    });
+  } else {
+    rawBlocks = Array.from(document.querySelectorAll('h1, h2, h3, h4'));
+  }
 
   /* 3. 過濾無效/隱藏/選單標題 */
   let blocks = rawBlocks.filter(block => {
     let rect = block.getBoundingClientRect();
     let text = (block.innerText || '').trim();
-
     let isVisible = rect.height > 0 && rect.width > 0;
     let hasText = text.length > 0;
     let isNotNav = !block.closest('nav') && !block.closest('aside') && !block.closest('header');
-
     return isVisible && hasText && isNotNav;
   });
 
+  /* 4. 去除重複元素 */
+  blocks = blocks.filter((block, index, self) => self.indexOf(block) === index);
+
   if(blocks.length === 0) {
-    alert('畫面上找不到 H1 ~ H4 標題！');
+    alert('畫面上找不到 AI 的標題或粗體大綱！');
     return;
   }
 
-  /* 4. 建立右側「支援滾動」的容器 */
+  /* 5. 建立右側「支援滾動」的容器 */
   let container = document.createElement('div');
   container.id = 'heading-minimap';
   Object.assign(container.style, {
-    position: 'fixed',
-    right: '12px',
-    top: '50%',
-    transform: 'translateY(-50%)',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-end', /* 靠右對齊 */
-    gap: '6px',
-    zIndex: '999999',
-    maxHeight: '80vh',     /* 核心：限制最高佔螢幕 80% */
-    overflowY: 'auto',     /* 核心：超出時自動開啟滾動條 */
-    paddingRight: '6px',
-    paddingLeft: '6px',
-    scrollBehavior: 'smooth'
+    position: 'fixed', right: '12px', top: '50%', transform: 'translateY(-50%)',
+    display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+    gap: '6px', zIndex: '999999', maxHeight: '80vh', overflowY: 'auto',
+    paddingRight: '6px', paddingLeft: '6px', scrollBehavior: 'smooth'
   });
 
-  /* 5. 階層色彩與尺寸設定檔 */
+  /* 6. 階層色彩與尺寸設定 */
   let config = {
     'h1': { width: '30px', color: '#1a73e8', hover: '#0d47a1', icon: '📌' }, /* 藍色 */
     'h2': { width: '24px', color: '#129e55', hover: '#0b6635', icon: '📍' }, /* 綠色 */
     'h3': { width: '18px', color: '#e37400', hover: '#b05900', icon: '🔹' }, /* 橘色 */
-    'h4': { width: '12px', color: '#757575', hover: '#333333', icon: '▪️' }  /* 灰色 */
+    'h4': { width: '12px', color: '#757575', hover: '#333333', icon: '▪️' }  /* 灰色 (含 GPT 粗體備用) */
   };
 
-  /* 6. 生成導航線 */
+  /* 7. 生成導航線 */
   blocks.forEach(function(block) {
     let line = document.createElement('div');
-    let tag = block.tagName.toLowerCase();
+    let tag = block.isFallbackBold ? 'h4' : block.tagName.toLowerCase();
     let cfg = config[tag] || config['h4'];
 
     Object.assign(line.style, {
-      width: cfg.width,
-      height: '4px',
-      flexShrink: '0', /* 防止項目過多時高度被擠壓 */
-      backgroundColor: cfg.color,
-      borderRadius: '2px',
-      cursor: 'pointer',
-      transition: 'all 0.2s ease'
+      width: cfg.width, height: '4px', flexShrink: '0',
+      backgroundColor: cfg.color, borderRadius: '2px',
+      cursor: 'pointer', transition: 'all 0.2s ease'
     });
 
-    /* 多行內文預覽 */
     let titleText = block.innerText.replace(/\s+/g, ' ').trim();
     let previewText = '';
-    let nextEl = block.nextElementSibling;
+    let nextEl = block.nextElementSibling || (block.parentElement ? block.parentElement.nextElementSibling : null);
     let grabbedChars = 0;
 
     while (nextEl && grabbedChars < 120) {
       let text = (nextEl.innerText || '').replace(/\s+/g, ' ').trim();
-      if (text.length > 0) {
+      if (text.length > 0 && text !== titleText) {
         previewText += (previewText ? ' ' : '') + text;
         grabbedChars += text.length;
       }
@@ -90,21 +97,20 @@ javascript:(function(){
     }
     line.title = fullTooltip;
 
-    /* 點擊定位 (帶 100px 頂部間距防遮擋 + 黃色高亮) */
     line.onclick = function(e) {
       try {
         block.style.scrollMarginTop = '100px';
         block.scrollIntoView({behavior: 'smooth', block: 'start'});
 
-        let oldBg = block.style.backgroundColor;
-        block.style.backgroundColor = 'rgba(255, 235, 59, 0.5)';
-        setTimeout(function() { block.style.backgroundColor = oldBg; }, 800);
+        let targetEl = block.parentElement && block.isFallbackBold ? block.parentElement : block;
+        let oldBg = targetEl.style.backgroundColor;
+        targetEl.style.backgroundColor = 'rgba(255, 235, 59, 0.5)';
+        setTimeout(function() { targetEl.style.backgroundColor = oldBg; }, 800);
       } catch(err) {
         console.log('跳轉失敗', err);
       }
     };
 
-    /* 懸浮效果：顏色加深並稍微拉長 */
     line.onmouseover = function() {
       line.style.backgroundColor = cfg.hover;
       line.style.transform = 'scaleX(1.15)';
