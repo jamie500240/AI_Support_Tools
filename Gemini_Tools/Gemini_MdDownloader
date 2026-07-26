@@ -1,0 +1,33 @@
+javascript:(function(){
+  /* 1. 抓取對話內容 */
+  let selectors = 'message-content, user-query, model-response, div[data-message-author]';
+  let blocks = document.querySelectorAll(selectors);
+  
+  if(blocks.length === 0) {
+    alert('找不到對話內容，請確認頁面已載入完成！');
+    return;
+  }
+
+  /* 2. 組合 Markdown 格式文字 */
+  let markdownText = `# Gemini 對話備份 (${new Date().toLocaleDateString()})\n\n---\n\n`;
+  
+  blocks.forEach((block, index) => {
+    let content = block.innerText.trim();
+    if(content) {
+      markdownText += `### 💬 對話區塊 ${index + 1}\n\n${content}\n\n---\n\n`;
+    }
+  });
+
+  /* 3. 觸發瀏覽器原生的檔案下載 */
+  let blob = new Blob([markdownText], { type: 'text/markdown;charset=utf-8;' });
+  let link = document.createElement('a');
+  let url = URL.createObjectURL(blob);
+  
+  link.setAttribute('href', url);
+  link.setAttribute('download', `Gemini_Chat_${Date.now()}.md`);
+  link.style.visibility = 'hidden';
+  
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+})();
