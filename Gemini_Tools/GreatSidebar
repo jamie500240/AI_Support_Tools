@@ -1,0 +1,104 @@
+javascript:(function(){
+  /* 1. 清除舊的導航列 */
+  let existing = document.getElementById('heading-minimap');
+  if(existing) existing.remove();
+
+  /* 2. 抓取標準 HTML 標題標籤 (h1, h2, h3) */
+  let rawBlocks = Array.from(document.querySelectorAll('h1, h2, h3'));
+
+  /* 3. 精確過濾：必須是 AI 產生的實體標題，排除側欄選單、頂部 Header 等雜訊 */
+  let blocks = rawBlocks.filter(block => {
+    let rect = block.getBoundingClientRect();
+    let text = (block.innerText || '').trim();
+
+    /* 條件：在螢幕上可見、有內容，且不屬於導覽列 (nav) 或側邊欄 (aside) */
+    let isVisible = rect.height > 0 && rect.width > 0;
+    let hasText = text.length > 0;
+    let isNotNav = !block.closest('nav') && !block.closest('aside') && !block.closest('header');
+
+    return isVisible && hasText && isNotNav;
+  });
+
+  if(blocks.length === 0) {
+    alert('畫面上找不到 AI 的大標題！(確保回答中有使用 # 或 ##)');
+    return;
+  }
+
+  /* 4. 建立右側容器 */
+  let container = document.createElement('div');
+  container.id = 'heading-minimap';
+  Object.assign(container.style, {
+    position: 'fixed', right: '20px', top: '50%', transform: 'translateY(-50%)',
+    display: 'flex', flexDirection: 'column', gap: '8px', zIndex: '999999',
+    width: '32px'
+  });
+
+  /* 5. 生成導航線 */
+  blocks.forEach(function(block) {
+    let line = document.createElement('div');
+    let tagName = block.tagName.toLowerCase();
+    
+    /* h1 最寬 (28px)，h2 中等 (22px)，h3 最短 (16px) */
+    let widthMap = { 'h1': '28px', 'h2': '22px', 'h3': '16px' };
+    let lineWidth = widthMap[tagName] || '20px';
+
+    Object.assign(line.style, {
+      width: lineWidth,
+      height: '4px',
+      backgroundColor: '#5f6368',
+      borderRadius: '2px',
+      cursor: 'pointer',
+      transition: 'all 0.3s',
+      alignSelf: 'flex-start'
+    });
+    
+    /* 核心修改：往後多抓取幾行內文作為預覽 */
+    let titleText = block.innerText.replace(/\s+/g, ' ').trim();
+    let previewText = '';
+    
+    /* 嘗試向後尋找同層級的下一個元素（例如內文段落 <p> 或清單 <ul>） */
+    let nextEl = block.nextElementSibling;
+    let grabbedChars = 0;
+    while (nextEl && grabbedChars < 120) {
+      let text = (nextEl.innerText || '').replace(/\s+/g, ' ').trim();
+      if (text.length > 0) {
+        previewText += (previewText ? ' ' : '') + text;
+        grabbedChars += text.length;
+      }
+      /* 如果下一個元素本身也是大標題，就停止往後抓 */
+      if (/^h[1-6]$/i.test(nextEl.tagName)) break;
+      nextEl = nextEl.nextElementSibling;
+    }
+
+    /* 組合提示文字：【標題】+ 內文前 100 個字 */
+    let fullTooltip = '📌 ' + titleText;
+    if (previewText) {
+      let truncatedPreview = previewText.length > 100 ? previewText.substring(0, 100) + '...' : previewText;
+      fullTooltip += '\n\n📝 ' + truncatedPreview;
+    }
+    
+    line.title = fullTooltip;
+
+    /* 點擊定位 (帶 100px 頂部間距防遮擋 + 黃色高亮) */
+    line.onclick = function(e) {
+      try {
+        block.style.scrollMarginTop = '100px';
+        block.scrollIntoView({behavior: 'smooth', block: 'start'});
+        
+        let oldBg = block.style.backgroundColor;
+        block.style.backgroundColor = 'rgba(255, 235, 59, 0.4)';
+        setTimeout(function() { block.style.backgroundColor = oldBg; }, 800);
+      } catch(err) {
+        console.log('跳轉失敗', err);
+      }
+    };
+
+    /* 懸浮變色 */
+    line.onmouseover = function() { line.style.backgroundColor = '#000000'; };
+    line.onmouseout = function() { line.style.backgroundColor = '#5f6368'; };
+    
+    container.appendChild(line);
+  });
+
+  document.body.appendChild(container);
+})();
