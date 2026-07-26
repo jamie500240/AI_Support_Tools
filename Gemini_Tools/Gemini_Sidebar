@@ -3,7 +3,7 @@ javascript:(function(){
   let existing = document.getElementById('gemini-minimap');
   if(existing) existing.remove();
 
-  /* 2. 擴大搜尋範圍，把 Google 可能用的對話標籤都加進來 */
+  /* 2. 100% 使用你原本成功的選擇器 */
   let selectors = [
     'message-content', 
     'user-query', 
@@ -15,34 +15,69 @@ javascript:(function(){
 
   let blocks = document.querySelectorAll(selectors); 
   
-  /* 如果真的找不到，跳出提醒 */
   if(blocks.length === 0) {
-    alert('找不到對話區塊！可能是剛開新對話，或是網頁結構又改版了。');
+    alert('找不到對話區塊！');
     return;
   }
 
-  /* 3. 建立右側容器 (提高 zIndex 確保在最上層) */
+  /* 3. 建立右側容器，設定固定寬度讓靠左右能發揮作用 */
   let container = document.createElement('div');
   container.id = 'gemini-minimap';
   Object.assign(container.style, {
     position: 'fixed', right: '20px', top: '50%', transform: 'translateY(-50%)',
-    display: 'flex', flexDirection: 'column', gap: '8px', zIndex: '999999'
+    display: 'flex', flexDirection: 'column', gap: '8px', zIndex: '999999',
+    width: '32px'
   });
 
-  /* 4. 根據抓到的對話生成橫線與預覽文字 */
-  blocks.forEach((block) => {
+  /* 4. 生成導航線 */
+  blocks.forEach(function(block) {
     let line = document.createElement('div');
+    
+    /* 安全判斷：是你還是AI (避免程式報錯) */
+    let isUser = false;
+    let tag = block.tagName ? block.tagName.toLowerCase() : '';
+    let author = block.getAttribute('data-message-author') || '';
+    let cls = block.getAttribute('class') || '';
+    
+    if (tag === 'user-query' || author === 'user') {
+        isUser = true;
+    } else if (block.closest && (block.closest('user-query') || block.closest('[data-message-author="user"]'))) {
+        isUser = true;
+    } else if (typeof cls === 'string' && cls.includes('user')) {
+        isUser = true;
+    }
+
+    /* 設定樣式：藍色靠右(你)，灰色靠左(AI) */
+    let bgColor = isUser ? '#1a73e8' : '#5f6368';
     Object.assign(line.style, {
-      width: '24px', height: '4px', backgroundColor: '#d3d3d3',
-      borderRadius: '2px', cursor: 'pointer', transition: 'background-color 0.3s'
+      width: isUser ? '20px' : '28px', 
+      height: '4px', 
+      backgroundColor: bgColor,
+      borderRadius: '2px', 
+      cursor: 'pointer', 
+      transition: 'all 0.3s',
+      alignSelf: isUser ? 'flex-end' : 'flex-start'
     });
     
-    let text = block.innerText.replace(/\s+/g, ' ').trim();
-    line.title = text.length > 30 ? text.substring(0, 30) + '...' : (text || '圖片或無文字內容');
+    /* 抓取文字與設定 Title */
+    let text = block.innerText || '';
+    text = text.replace(/\s+/g, ' ').trim();
+    line.title = (isUser ? '你: ' : 'AI: ') + (text.length > 30 ? text.substring(0, 30) + '...' : (text || '圖片或無文字內容'));
 
-    line.onclick = () => block.scrollIntoView({behavior: 'smooth', block: 'center'});
-    line.onmouseover = () => line.style.backgroundColor = '#000000';
-    line.onmouseout = () => line.style.backgroundColor = '#d3d3d3';
+    /* 安全的點擊跳轉 (加上微微的高亮提示) */
+    line.onclick = function(e) {
+      try {
+        block.scrollIntoView({behavior: 'smooth', block: 'center'});
+        let oldBg = block.style.backgroundColor;
+        block.style.backgroundColor = 'rgba(255, 235, 59, 0.2)';
+        setTimeout(function() { block.style.backgroundColor = oldBg; }, 800);
+      } catch(err) {
+        console.log('跳轉失敗', err);
+      }
+    };
+
+    line.onmouseover = function() { line.style.backgroundColor = isUser ? '#0d47a1' : '#000000'; };
+    line.onmouseout = function() { line.style.backgroundColor = bgColor; };
     
     container.appendChild(line);
   });
