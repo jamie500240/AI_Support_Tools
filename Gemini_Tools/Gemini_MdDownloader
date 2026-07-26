@@ -1,33 +1,56 @@
-javascript:(function(){
-  /* 1. 抓取對話內容 */
-  let selectors = 'message-content, user-query, model-response, div[data-message-author]';
-  let blocks = document.querySelectorAll(selectors);
-  
-  if(blocks.length === 0) {
-    alert('找不到對話內容，請確認頁面已載入完成！');
-    return;
-  }
-
-  /* 2. 組合 Markdown 格式文字 */
-  let markdownText = `# Gemini 對話備份 (${new Date().toLocaleDateString()})\n\n---\n\n`;
-  
-  blocks.forEach((block, index) => {
-    let content = block.innerText.trim();
-    if(content) {
-      markdownText += `### 💬 對話區塊 ${index + 1}\n\n${content}\n\n---\n\n`;
+javascript:(async function(){
+  try {
+    var blocks = document.querySelectorAll('message-content, user-query, model-response, div[data-message-author], div[class*="message-content"]');
+    if(blocks.length === 0) { alert('找不到對話內容！'); return; }
+    
+    var toast = document.createElement('div');
+    toast.innerText = '正在擷取圖文並轉檔（如果圖片很多需要幾秒鐘），請稍候...';
+    toast.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:12px 24px;border-radius:8px;z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.3);';
+    document.body.appendChild(toast);
+    
+    var md = '# Gemini 對話備份 (' + new Date().toLocaleDateString() + ')\n\n---\n\n';
+    
+    for(var i=0; i<blocks.length; i++) {
+      var b = blocks[i];
+      var imgs = Array.from(b.querySelectorAll('img')).filter(function(img){ 
+        return !img.src.includes('avatar') && img.width > 20; 
+      });
+      var text = b.innerText ? b.innerText.trim() : '';
+      
+      if(!text && imgs.length === 0) continue;
+      
+      md += '### 💬 對話區塊 ' + (i+1) + '\n\n';
+      if(text) md += text + '\n\n';
+      
+      for(var j=0; j<imgs.length; j++) {
+        var imgSrc = imgs[j].src;
+        try {
+          var res = await fetch(imgSrc);
+          var blob = await res.blob();
+          var b64 = await new Promise(function(r){
+            var f = new FileReader();
+            f.onloadend = function(){ r(f.result); };
+            f.readAsDataURL(blob);
+          });
+          md += '![圖片](' + b64 + ')\n\n';
+        } catch(e) {
+          md += '![圖片](' + imgSrc + ')\n\n';
+        }
+      }
+      md += '---\n\n';
     }
-  });
-
-  /* 3. 觸發瀏覽器原生的檔案下載 */
-  let blob = new Blob([markdownText], { type: 'text/markdown;charset=utf-8;' });
-  let link = document.createElement('a');
-  let url = URL.createObjectURL(blob);
-  
-  link.setAttribute('href', url);
-  link.setAttribute('download', `Gemini_Chat_${Date.now()}.md`);
-  link.style.visibility = 'hidden';
-  
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
+    
+    var finalBlob = new Blob([md], {type:'text/markdown;charset=utf-8;'});
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(finalBlob);
+    a.download = 'Gemini_Backup_' + Date.now() + '.md';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast.remove();
+    
+  } catch(err) {
+    alert('發生錯誤: ' + err.message);
+  }
 })();
