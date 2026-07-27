@@ -1,128 +1,179 @@
 javascript:(function(){
-  /* 1. 清除舊的導航列 */
-  let existing = document.getElementById('heading-minimap');
-  if(existing) existing.remove();
+  const CONTAINER_SELECTORS = '[data-message-author-role="assistant"], .markdown, .prose, article';
+  const HEADING_SELECTORS = 'h1, h2, h3, h4';
 
-  /* 2. 優先鎖定 AI 回答區塊 (涵蓋 ChatGPT, Claude, Gemini, Perplexity) */
-  let aiContainers = document.querySelectorAll('[data-message-author-role="assistant"], .markdown, .prose, article');
-  let rawBlocks = [];
+  function cleanupPrevious(){
+    let s = window.__titleMinimapState;
+    if (!s) return;
+    if (s.observer) s.observer.disconnect();
+    if (s.debounce) clearTimeout(s.debounce);
+    if (s.onVisibility) document.removeEventListener('visibilitychange', s.onVisibility);
+    if (s.onPagehide) window.removeEventListener('pagehide', s.onPagehide);
+    window.__titleMinimapState = null;
+  }
+  cleanupPrevious();
 
-  if (aiContainers.length > 0) {
-    aiContainers.forEach(container => {
-      let headings = Array.from(container.querySelectorAll('h1, h2, h3, h4'));
-      rawBlocks.push(...headings);
+  let state = { observer: null, debounce: null, onVisibility: null, onPagehide: null };
+  window.__titleMinimapState = state;
 
-      /* 解決 GPT 痛點：若該則回答沒有 Markdown 標題，自動抓取開頭粗體字當備用標題 */
-      if (headings.length === 0) {
-        let bolds = Array.from(container.querySelectorAll('p > strong:first-child, p > b:first-child'));
-        bolds.forEach(b => {
-          if ((b.innerText || '').trim().length > 2) {
-            b.isFallbackBold = true;
-            rawBlocks.push(b);
-          }
-        });
-      }
+  function rebuild(){
+    let existing = document.getElementById('heading-minimap');
+    if(existing) existing.remove();
+
+    let aiContainers = document.querySelectorAll(CONTAINER_SELECTORS);
+    let rawBlocks = [];
+
+    if (aiContainers.length > 0) {
+      aiContainers.forEach(container => {
+        let headings = Array.from(container.querySelectorAll(HEADING_SELECTORS));
+        rawBlocks.push(...headings);
+
+        if (headings.length === 0) {
+          let bolds = Array.from(container.querySelectorAll('p > strong:first-child, p > b:first-child'));
+          bolds.forEach(b => {
+            if ((b.innerText || '').trim().length > 2) {
+              b.isFallbackBold = true;
+              rawBlocks.push(b);
+            }
+          });
+        }
+      });
+    } else {
+      rawBlocks = Array.from(document.querySelectorAll(HEADING_SELECTORS));
+    }
+
+    let blocks = rawBlocks.filter(block => {
+      let rect = block.getBoundingClientRect();
+      let text = (block.innerText || '').trim();
+      let isVisible = rect.height > 0 && rect.width > 0;
+      let hasText = text.length > 0;
+      let isNotNav = !block.closest('nav') && !block.closest('aside') && !block.closest('header');
+      return isVisible && hasText && isNotNav;
     });
-  } else {
-    rawBlocks = Array.from(document.querySelectorAll('h1, h2, h3, h4'));
+    blocks = blocks.filter((block, index, self) => self.indexOf(block) === index);
+
+    if(blocks.length === 0) return;
+
+    let container = document.createElement('div');
+    container.id = 'heading-minimap';
+    Object.assign(container.style, {
+      position: 'fixed', right: '12px', top: '50%', transform: 'translateY(-50%)',
+      display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+      gap: '6px', zIndex: '999999', maxHeight: '80vh', overflowY: 'auto',
+      paddingRight: '6px', paddingLeft: '6px', scrollBehavior: 'smooth'
+    });
+
+    let config = {
+      'h1': { width: '30px', color: '#1a73e8', hover: '#0d47a1', icon: '📌' },
+      'h2': { width: '24px', color: '#129e55', hover: '#0b6635', icon: '📍' },
+      'h3': { width: '18px', color: '#e37400', hover: '#b05900', icon: '🔹' },
+      'h4': { width: '12px', color: '#757575', hover: '#333333', icon: '▪️' }
+    };
+
+    blocks.forEach(function(block) {
+      let line = document.createElement('div');
+      let tag = block.isFallbackBold ? 'h4' : block.tagName.toLowerCase();
+      let cfg = config[tag] || config['h4'];
+
+      Object.assign(line.style, {
+        width: cfg.width, height: '4px', flexShrink: '0',
+        backgroundColor: cfg.color, borderRadius: '2px',
+        cursor: 'pointer', transition: 'all 0.2s ease'
+      });
+
+      let titleText = block.innerText.replace(/\s+/g, ' ').trim();
+      let previewText = '';
+      let nextEl = block.nextElementSibling || (block.parentElement ? block.parentElement.nextElementSibling : null);
+      let grabbedChars = 0;
+
+      while (nextEl && grabbedChars < 120) {
+        let text = (nextEl.innerText || '').replace(/\s+/g, ' ').trim();
+        if (text.length > 0 && text !== titleText) {
+          previewText += (previewText ? ' ' : '') + text;
+          grabbedChars += text.length;
+        }
+        if (/^h[1-6]$/i.test(nextEl.tagName)) break;
+        nextEl = nextEl.nextElementSibling;
+      }
+
+      let fullTooltip = cfg.icon + ' ' + titleText;
+      if (previewText) {
+        let truncated = previewText.length > 100 ? previewText.substring(0, 100) + '...' : previewText;
+        fullTooltip += '\n\n📝 ' + truncated;
+      }
+      line.title = fullTooltip;
+
+      line.onclick = function(e) {
+        try {
+          block.style.scrollMarginTop = '100px';
+          block.scrollIntoView({behavior: 'smooth', block: 'start'});
+          let targetEl = block.parentElement && block.isFallbackBold ? block.parentElement : block;
+          let oldBg = targetEl.style.backgroundColor;
+          targetEl.style.backgroundColor = 'rgba(255, 235, 59, 0.5)';
+          setTimeout(function() { targetEl.style.backgroundColor = oldBg; }, 800);
+        } catch(err) { console.log('跳轉失敗', err); }
+      };
+
+      line.onmouseover = function() {
+        line.style.backgroundColor = cfg.hover;
+        line.style.transform = 'scaleX(1.15)';
+        line.style.transformOrigin = 'right';
+      };
+      line.onmouseout = function() {
+        line.style.backgroundColor = cfg.color;
+        line.style.transform = 'scaleX(1)';
+      };
+
+      container.appendChild(line);
+    });
+
+    document.body.appendChild(container);
   }
 
-  /* 3. 過濾無效/隱藏/選單標題 */
-  let blocks = rawBlocks.filter(block => {
-    let rect = block.getBoundingClientRect();
-    let text = (block.innerText || '').trim();
-    let isVisible = rect.height > 0 && rect.width > 0;
-    let hasText = text.length > 0;
-    let isNotNav = !block.closest('nav') && !block.closest('aside') && !block.closest('header');
-    return isVisible && hasText && isNotNav;
-  });
+  /* 精準過濾：新增/移除節點需命中標題或 AI 容器選擇器，才視為有意義的變動 */
+  function mutationLooksRelevant(mutationsList){
+    const COMBINED = HEADING_SELECTORS + ', ' + CONTAINER_SELECTORS;
+    for (const m of mutationsList) {
+      for (const node of m.addedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.matches && node.matches(COMBINED)) return true;
+        if (node.querySelector && node.querySelector(COMBINED)) return true;
+      }
+      for (const node of m.removedNodes) {
+        if (node.nodeType !== 1) continue;
+        if (node.matches && node.matches(COMBINED)) return true;
+      }
+    }
+    return false;
+  }
 
-  /* 4. 去除重複元素 */
-  blocks = blocks.filter((block, index, self) => self.indexOf(block) === index);
+  function scheduleRebuild(){
+    clearTimeout(state.debounce);
+    state.debounce = setTimeout(rebuild, 500);
+  }
 
-  if(blocks.length === 0) {
+  rebuild();
+  if (!document.getElementById('heading-minimap')) {
     alert('畫面上找不到 AI 的標題或粗體大綱！');
+    cleanupPrevious();
     return;
   }
 
-  /* 5. 建立右側「支援滾動」的容器 */
-  let container = document.createElement('div');
-  container.id = 'heading-minimap';
-  Object.assign(container.style, {
-    position: 'fixed', right: '12px', top: '50%', transform: 'translateY(-50%)',
-    display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
-    gap: '6px', zIndex: '999999', maxHeight: '80vh', overflowY: 'auto',
-    paddingRight: '6px', paddingLeft: '6px', scrollBehavior: 'smooth'
+  state.observer = new MutationObserver(function(mutationsList){
+    if (mutationLooksRelevant(mutationsList)) scheduleRebuild();
   });
+  state.observer.observe(document.body, { childList: true, subtree: true });
 
-  /* 6. 階層色彩與尺寸設定 */
-  let config = {
-    'h1': { width: '30px', color: '#1a73e8', hover: '#0d47a1', icon: '📌' }, /* 藍色 */
-    'h2': { width: '24px', color: '#129e55', hover: '#0b6635', icon: '📍' }, /* 綠色 */
-    'h3': { width: '18px', color: '#e37400', hover: '#b05900', icon: '🔹' }, /* 橘色 */
-    'h4': { width: '12px', color: '#757575', hover: '#333333', icon: '▪️' }  /* 灰色 (含 GPT 粗體備用) */
+  state.onVisibility = function(){
+    if (document.hidden) {
+      if (state.observer) state.observer.disconnect();
+    } else {
+      if (state.observer) state.observer.observe(document.body, { childList: true, subtree: true });
+      scheduleRebuild();
+    }
   };
+  document.addEventListener('visibilitychange', state.onVisibility);
 
-  /* 7. 生成導航線 */
-  blocks.forEach(function(block) {
-    let line = document.createElement('div');
-    let tag = block.isFallbackBold ? 'h4' : block.tagName.toLowerCase();
-    let cfg = config[tag] || config['h4'];
-
-    Object.assign(line.style, {
-      width: cfg.width, height: '4px', flexShrink: '0',
-      backgroundColor: cfg.color, borderRadius: '2px',
-      cursor: 'pointer', transition: 'all 0.2s ease'
-    });
-
-    let titleText = block.innerText.replace(/\s+/g, ' ').trim();
-    let previewText = '';
-    let nextEl = block.nextElementSibling || (block.parentElement ? block.parentElement.nextElementSibling : null);
-    let grabbedChars = 0;
-
-    while (nextEl && grabbedChars < 120) {
-      let text = (nextEl.innerText || '').replace(/\s+/g, ' ').trim();
-      if (text.length > 0 && text !== titleText) {
-        previewText += (previewText ? ' ' : '') + text;
-        grabbedChars += text.length;
-      }
-      if (/^h[1-6]$/i.test(nextEl.tagName)) break;
-      nextEl = nextEl.nextElementSibling;
-    }
-
-    let fullTooltip = cfg.icon + ' ' + titleText;
-    if (previewText) {
-      let truncated = previewText.length > 100 ? previewText.substring(0, 100) + '...' : previewText;
-      fullTooltip += '\n\n📝 ' + truncated;
-    }
-    line.title = fullTooltip;
-
-    line.onclick = function(e) {
-      try {
-        block.style.scrollMarginTop = '100px';
-        block.scrollIntoView({behavior: 'smooth', block: 'start'});
-
-        let targetEl = block.parentElement && block.isFallbackBold ? block.parentElement : block;
-        let oldBg = targetEl.style.backgroundColor;
-        targetEl.style.backgroundColor = 'rgba(255, 235, 59, 0.5)';
-        setTimeout(function() { targetEl.style.backgroundColor = oldBg; }, 800);
-      } catch(err) {
-        console.log('跳轉失敗', err);
-      }
-    };
-
-    line.onmouseover = function() {
-      line.style.backgroundColor = cfg.hover;
-      line.style.transform = 'scaleX(1.15)';
-      line.style.transformOrigin = 'right';
-    };
-    line.onmouseout = function() {
-      line.style.backgroundColor = cfg.color;
-      line.style.transform = 'scaleX(1)';
-    };
-
-    container.appendChild(line);
-  });
-
-  document.body.appendChild(container);
+  state.onPagehide = cleanupPrevious;
+  window.addEventListener('pagehide', state.onPagehide);
 })();
